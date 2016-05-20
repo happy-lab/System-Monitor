@@ -1,0 +1,17 @@
+[logging]
+# Levels from the Python logging module:
+#    CRITICAL  50
+#    ERROR     40
+#    WARNING   30
+#    INFO      20
+#    DEBUG     10
+#    NOTSET    0
+level = 40
+
+[collector]
+interval = 15
+
+[mqtt]
+topic = home/system
+host = localhost
+port = 1883

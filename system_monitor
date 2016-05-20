@@ -1,0 +1,364 @@
+#!/usr/bin/python
+
+import sys
+import os
+import time
+import re
+import signal
+import threading
+import logging
+import datetime
+import platform
+import argparse
+import traceback
+import configparser
+import subprocess
+import json
+import paho.mqtt.client as mqtt
+
+
+def delay(interval):
+    return interval - (time.time() % interval)
+
+def mqtt_on_connect(client, userdata, flags, rc):
+    logger.debug('on_connect: userdata=%s rc=%d' % (userdata,  rc))
+
+def mqtt_on_message(client, userdata, message):
+    logger.debug('on_message: %s %s %d' %
+                 (message.topic, message.payload.decode("utf-8"),
+                  message.qos[0]))
+
+def mqtt_on_publish(client, userdata, mid):
+    logger.debug('on_publish: userdata=%s mid=%d' % (userdata, mid))
+
+def mqtt_on_log(client, userdata, level, message):
+    logger.debug('on_log: userdata=%s level=%s message=%s' %
+                 (userdata, level, message))
+
+last_raw = {'context_switch': {},
+            'cpus': {},
+            'diskstats': {},
+            'netdev': {}}
+
+def get_delta(dictionaries, name, current):
+    dictionary = last_raw
+    for next in dictionaries:
+        if next in dictionary:
+            dictionary = dictionary[next]
+        else:
+            dictionary = None
+            break
+    delta = None
+    if dictionary:
+        if name in dictionary:
+            delta = current - dictionary[name]
+    return delta
+
+
+def loadavg():
+    with open('/proc/loadavg', 'r') as loadavg:
+        parts = loadavg.readline().strip().split(' ')
+        running, sleeping = parts[3].split('/')
+        load = { '1':  float(parts[0]),
+                 '5':  float(parts[1]),
+                 '15': float(parts[2])}
+        processes = {'running': int(running),
+                     'sleeping': int(sleeping),
+                     'last': int(parts[4])}
+        return {'load': load, 'processes': processes}
+
+
+meminfo_pattern = re.compile(r'^(\w+):\s+(\d+)\s+kB$')
+memory_wanted = {'MemTotal':     'total',
+                 'Memfree':      'free',
+                 'Buffers':      'buffered',
+                 'Cached':       'cached',
+                 'Slab':         'slab_total',
+                 'SReclaimable': 'slab_reclaimable',
+                 'SUnreclaim':   'slab_unreclaimable'}
+
+def meminfo():
+    with open('/proc/meminfo', 'r') as meminfo:
+        value = { 'memory': {} }
+        for line in meminfo:
+            match = meminfo_pattern.match(line.strip())
+            if match:
+                if match.group(1) in memory_wanted:
+                    variable = memory_wanted[match.group(1)]
+                    value['memory'][variable] = int(float(match.group(2)) * 1024.0)
+    return value
+
+
+stat_cpu_columns =['busy', 'waiting',
+                   'user', 'nice', 'system', 'idle', 'iowait',
+                   'interrupt', 'softirq', 'steal',
+                   'guest', 'guest_nice']
+
+def stat():
+    with open('/proc/stat', 'r') as stat:
+        utilization = {}
+        for line in stat:
+            parts = ' '.join(line.strip().split()).split()
+            if parts[0] == 'ctxt':
+                count = int(parts[1])
+                context_switch = { 'count': count }
+                delta = get_delta(['context_switch'], 'count', count)
+                if delta:
+                    rate = float(delta) / float(interval)
+                    context_switch['rate'] = round(rate, 2)
+                    context_switch['delta'] = delta
+                last_raw['context_switch'] = {'count': count}
+            elif parts[0].startswith('cpu'):
+                cpu = parts.pop(0)
+                raw = list(map(float, parts))
+                if cpu in last_raw['cpus']:
+                    last = last_raw['cpus'][cpu]
+                    delta = [r - l for (r, l) in zip(raw, last)]
+                    total = sum(delta)
+                    waiting = delta[3] + delta[4]
+                    busy = (delta[0] + delta[1] +
+                            delta[2] + delta[5] +
+                            delta[6] + delta[7])
+                    delta.append(waiting)
+                    delta.append(busy)
+                    percentages = [round((d / total) * 100.0, 2)
+                                   for d in [busy, waiting] + delta]
+                    data = dict(zip(stat_cpu_columns, percentages))
+                    utilization[cpu] = data
+                last_raw['cpus'][cpu] = raw
+    stats = {'context_switch': context_switch}
+    if len(utilization) != 0:
+        stats['utilization'] = utilization
+    return stats
+
+
+diskstats_columns = ['reads_completed', 'reads_merged', 'reads_bytes', 'reads_time',
+                     'writes_completed', 'writes_merged', 'writes_bytes', 'writes_time',
+                     'current_operations', 'io_time', 'io_time_weighted']
+
+def diskstats():
+    stats = {}
+    with open('/proc/diskstats', 'r') as diskstats:
+        for line in diskstats:
+            parts = ' '.join(line.strip().split()).split()
+            device = parts[2]
+            if device.startswith('sd') or device.startswith('mmcblk'):
+                raw = list(map(float, parts[3:]))
+                if device in last_raw['diskstats']:
+                    last = last_raw['diskstats'][device]
+                    delta = [r - l for (r, l) in zip(raw, last)]
+                    delta[2] *= 512.0
+                    delta[7] *= 512.0
+                    rates = [round(d / interval, 2) for d in delta]
+                    data = dict(zip(diskstats_columns, rates))
+                    stats[device] = data
+                last_raw['diskstats'][device] = raw
+    return {'diskstats': stats} if len(stats) != 0 else None
+
+
+netdev_columns = ['receive_bytes',      'receive_packets',
+                  'receive_errors',     'receive_dropped',
+                  'receive_fifo',       'receive_frame',
+                  'receive_compressed', 'receive_multicast',
+                  'transmit_bytes',     'transmist_packets',
+                  'transmit_errors',    'transmit_dropped',
+                  'transmit_fifo',      'transmit_collisions',
+                  'transmist_carrier',  'transmist_compressed']
+
+def netdev():
+    stats = {}
+    with open('/proc/net/dev', 'r') as netdev:
+        for line in netdev:
+            parts = ' '.join(line.strip().split()).split()
+            if parts[0].endswith(':'):
+                device = parts[0][0:-1]
+                if device == 'lo':
+                    device = 'loopback'
+                raw = list(map(float, parts[1:]))
+                if device in last_raw['netdev']:
+                    last = last_raw['netdev'][device]
+                    delta = [r - l for (r, l) in zip(raw, last)]
+                    rates = [round(d / interval, 2) for d in delta]
+                    data = dict(zip(netdev_columns, rates))
+                    stats[device] = data
+                last_raw['netdev'][device] = raw
+    return {'netdev': stats} if len(stats) != 0 else None
+
+
+def read_status(now, interval):
+    status = {'datetime': round(now, 3),
+              'interval': interval,
+              'system': system}
+    with open('/proc/stat', 'r') as stat:
+        for line in stat:
+            parts = ' '.join(line.strip().split()).split()
+            if parts[0] == 'btime':
+                status['uptime'] = int(now - float(parts[1]))
+                break
+    if temperature_path:
+        with open(temperature_path, 'r') as source:
+            temperature = float(source.readline().strip()) / 1000.0
+            status['temperature'] = round(temperature, 1)
+    return {'status': status}
+
+
+df_thread = None
+df_lock = threading.Lock()
+df_event = threading.Event()
+df_filesystems = None
+
+def df_task():
+
+    global df_filesystems
+
+    while not df_event.wait(delay(interval)):
+        filesystems = {}
+        df = subprocess.Popen('/bin/df -l',
+                              shell=True,
+                              universal_newlines=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+        line = df.stdout.readline()
+        for line in df.stdout:
+            parts = ' '.join(line.strip().split(' ')).split()
+            device = parts[0]
+            size = int(parts[1]) * 1024
+            used = int(parts[2]) * 1024
+            available = int(parts[3]) * 1024
+            used_percent = (float(used) / float(size)) * 100.0
+            if not 'tmpfs' in device:
+                disk = device.split('/')[2]
+                if disk == 'root':   # XXX - Need a better solution
+                    disk = 'mmcblk0p2'
+                filesystems[parts[5]] = {'device': disk,
+                                         'size': size,
+                                         'used': used,
+                                         'used%': round(used_percent, 0),
+                                         'available': available}
+        with df_lock:
+            df_filesystems = {'filesystems': filesystems}
+
+def df():
+
+    global df_thread
+    global df_filesystems
+
+    if not df_thread:
+        df_thread = threading.Thread(target=df_task)
+        df_thread.start()
+
+    with df_lock:
+        filesystems = df_filesystems
+        df_filesystems = None
+
+    return filesystems
+
+
+def processes():
+    return None
+
+
+def ntpd():
+    return None
+
+
+def merge_dictionaries(*dictionaries):
+    '''
+    Given any number of dictionaries, shallow copy and merge into a
+    new dictionary, precedence goes to key value pairs in latter
+    dictionaries.
+    '''
+    result = {}
+    for dictionary in dictionaries:
+        if dictionary:
+            result.update(dictionary)
+    return result
+
+
+def collect():
+
+    now = time.time()
+
+    results = []
+    results.append(read_status(now, interval))
+    results.append(loadavg())
+    results.append(meminfo())
+    results.append(stat())
+    results.append(df())
+    results.append(diskstats())
+    results.append(netdev())
+
+    elapsed = time.time() - now
+    logger.debug('collect: elapsed time - ' + str(round(elapsed, 6)))
+
+    return results
+
+
+temperature_sensors = [
+    '/sys/devices/virtual/thermal/thermal_zone0/temp'
+]
+for temperature_path in temperature_sensors:
+    if os.path.isfile(temperature_path):
+        break
+else:
+    temperature_path = none
+
+
+def signal_handler(signum, frame):
+    df_event.set()
+    terminate.set()
+    mqtt_client.disconnect()
+
+
+interval = 15
+terminate = threading.Event()
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description='Linux System Monitor Data Collector')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Use verbose logging.')
+    parser.add_argument('-c', '--file', action='store',
+                        default='/etc/sensors.d/system_monitor.conf',
+                        help='Configuration file.')
+    arguments = parser.parse_args()
+
+    configuration = configparser.ConfigParser()
+    configuration.read(arguments.file)
+
+    system = platform.node()
+    interval = int(configuration['collector'].get('interval', '15'))
+
+    level = int(configuration['logging'].get('level', '40'))
+    logger = logging.getLogger(__name__)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(level)
+
+    mqtt_topic = configuration['mqtt'].get('topic', 'home/system')
+    mqtt_host = configuration['mqtt'].get('host', 'localhost')
+    mqtt_port = int(configuration['mqtt'].get('port', '1883'))
+    mqtt_client = mqtt.Client(system + ':system_monitor' , True)
+    mqtt_client.on_message = mqtt_on_message
+    mqtt_client.on_connect = mqtt_on_connect
+    mqtt_client.on_publish = mqtt_on_publish
+    #mqtt_client.on_log = mqtt_on_log
+    mqtt_client.loop_start()
+    mqtt_client.connect(mqtt_host, mqtt_port, 60)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    time.sleep(delay(interval))
+    collect()
+
+    while not terminate.wait(delay(interval)):
+        data = collect()
+        contents = merge_dictionaries(*data)
+        message = json.dumps(contents)
+        mqtt_client.publish(mqtt_topic + '/' + system, message)
+
+    logger.info('Terminating')
+    sys.exit(0)
