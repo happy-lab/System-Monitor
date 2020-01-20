@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import sys
 import os
@@ -14,11 +14,75 @@ import traceback
 import configparser
 import subprocess
 import json
+import psutil
+import mdstat
 import paho.mqtt.client as mqtt
 
 
+#
+# Statistics collection interval.
+#
+
+interval = 15
+
+
+#
+# Last values to compute deltas.
+#
+
+last_diskstats = {}
+last_netdev = {}
+last_stats = {}
+last_utilizations = {}
+
+
+#
+# Temperature sensor mapping.
+#
+
+temperature_sensors = {
+        'cpu-thermal':       ['cpu-thermal', '/sys/devices/virtual/thermal/thermal_zone0/temp'],
+        'lm75':              ['board',       '/dev/thermal-board/temp1_input'],
+        'f10e4078.thermal':  ['cpu',         '/dev/thermal-cpu/temp1_input'],
+        'f1072004mdiomii00': ['ethernet',    '/dev/thermal-eth/temp1_input']}
+
+
+# 
+# Pulse- Width Modulation fan mapping
+#
+
+fan_sensors = [ ['fan1', '/dev/fan-j10/pwm1'], ['fan2', '/dev/fan-j17/pwm1'] ]
+
+
+#
+# Save the number of CPUs.
+#
+
+cpu_count = psutil.cpu_count()
+
+
+#
+# Signal handling.
+#
+
+terminate = threading.Event()
+
+def signal_handler(signum, frame):
+    terminate.set()
+    mqtt_client.disconnect()
+
+
+#
+# Compute the delay until the next interval boundary.
+#
+
 def delay(interval):
     return interval - (time.time() % interval)
+
+
+#
+# MQTT message and connection handlers.
+#
 
 def mqtt_on_connect(client, userdata, flags, rc):
     logger.debug('on_connect: userdata=%s rc=%d' % (userdata,  rc))
@@ -35,232 +99,224 @@ def mqtt_on_log(client, userdata, level, message):
     logger.debug('on_log: userdata=%s level=%s message=%s' %
                  (userdata, level, message))
 
-last_raw = {'context_switch': {},
-            'cpus': {},
-            'diskstats': {},
-            'netdev': {}}
 
-def get_delta(dictionaries, name, current):
-    dictionary = last_raw
-    for next in dictionaries:
-        if next in dictionary:
-            dictionary = dictionary[next]
-        else:
-            dictionary = None
-            break
-    delta = None
-    if dictionary:
-        if name in dictionary:
-            delta = current - dictionary[name]
-    return delta
-
+#
+# Collect system load statistics.
+#
 
 def loadavg():
+    #load = psutil.getloadavg()   # Will work with psutil 5.6.2
+    #load = {'load':  { '1':  load[0], '5':  load[1], '15': load[2]}}
     with open('/proc/loadavg', 'r') as loadavg:
         parts = loadavg.readline().strip().split(' ')
         running, sleeping = parts[3].split('/')
-        load = { '1':  float(parts[0]),
-                 '5':  float(parts[1]),
-                 '15': float(parts[2])}
+        last_pid = int(parts[4])
+        load = { '1':  float(parts[0]), '5':  float(parts[1]), '15': float(parts[2])}
         processes = {'running': int(running),
-                     'sleeping': int(sleeping),
-                     'last': int(parts[4])}
+                     'sleeping': int(sleeping)}
         return {'load': load, 'processes': processes}
 
 
-meminfo_pattern = re.compile(r'^(\w+):\s+(\d+)\s+kB$')
-memory_wanted = {'MemTotal':     'total',
-                 'Memfree':      'free',
-                 'Buffers':      'buffered',
-                 'Cached':       'cached',
-                 'Slab':         'slab_total',
-                 'SReclaimable': 'slab_reclaimable',
-                 'SUnreclaim':   'slab_unreclaimable'}
+#
+# Collect memory statistics.
+#
 
 def meminfo():
-    with open('/proc/meminfo', 'r') as meminfo:
-        value = { 'memory': {} }
-        for line in meminfo:
-            match = meminfo_pattern.match(line.strip())
-            if match:
-                if match.group(1) in memory_wanted:
-                    variable = memory_wanted[match.group(1)]
-                    value['memory'][variable] = int(float(match.group(2)) * 1024.0)
-    return value
+
+    memory = { 'virtual': {}, 'swap': {} }
+
+    virtual = psutil.virtual_memory()
+    values = [x for x in dir(virtual)
+                  if not x.startswith('_') and
+                     not callable(getattr(virtual, x)) and
+                     x != 'percent']
+    for value in values:
+        memory['virtual'][value] = getattr(virtual, value)
+
+    swap = psutil.swap_memory()
+    values = [x for x in dir(swap)
+                  if not x.startswith('_') and
+                     not callable(getattr(swap, x)) and
+                     x != 'percent']
+    for value in values:
+        memory['swap'][value] = getattr(swap, value)
+
+    return { 'memory': memory }
 
 
-stat_cpu_columns =['busy', 'waiting',
-                   'user', 'nice', 'system', 'idle', 'iowait',
-                   'interrupt', 'softirq', 'steal',
-                   'guest', 'guest_nice']
+#
+# Collect CPU tuilizations.
+#
 
-def stat():
-    with open('/proc/stat', 'r') as stat:
-        utilization = {}
-        for line in stat:
-            parts = ' '.join(line.strip().split()).split()
-            if parts[0] == 'ctxt':
-                count = int(parts[1])
-                context_switch = { 'count': count }
-                delta = get_delta(['context_switch'], 'count', count)
-                if delta:
-                    rate = float(delta) / float(interval)
-                    context_switch['rate'] = round(rate, 2)
-                    context_switch['delta'] = delta
-                last_raw['context_switch'] = {'count': count}
-            elif parts[0].startswith('cpu'):
-                cpu = parts.pop(0)
-                raw = list(map(float, parts))
-                if cpu in last_raw['cpus']:
-                    last = last_raw['cpus'][cpu]
-                    delta = [r - l for (r, l) in zip(raw, last)]
-                    total = sum(delta)
-                    waiting = delta[3] + delta[4]
-                    busy = (delta[0] + delta[1] +
-                            delta[2] + delta[5] +
-                            delta[6] + delta[7])
-                    delta.append(waiting)
-                    delta.append(busy)
-                    percentages = [round((d / total) * 100.0, 2)
-                                   for d in [busy, waiting] + delta]
-                    data = dict(zip(stat_cpu_columns, percentages))
-                    utilization[cpu] = data
-                last_raw['cpus'][cpu] = raw
-    stats = {'context_switch': context_switch}
-    if len(utilization) != 0:
-        stats['utilization'] = utilization
-    return stats
+def cpu_utilizations():
+
+    global last_utilizations
+
+    utilizations = {'percent': psutil.cpu_percent(),
+                    'interval': interval}
+
+    times = psutil.cpu_times()
+    values = [x for x in dir(times)
+                  if not x.startswith('_') and
+                     not callable(getattr(times, x))]
+    raw = {}
+    for value in values:
+        raw[value] = getattr(times, value)
+
+    for statistic in last_utilizations:
+        utilizations[statistic] = (raw[statistic] - last_utilizations[statistic]) / cpu_count
+
+    last_utilizations = raw
+    return {'cpu_utilizations': utilizations}
 
 
-diskstats_columns = ['reads_completed', 'reads_merged', 'reads_bytes', 'reads_time',
-                     'writes_completed', 'writes_merged', 'writes_bytes', 'writes_time',
-                     'current_operations', 'io_time', 'io_time_weighted']
+#
+# Collect CPU statistics.
+#
 
-def diskstats():
-    stats = {}
-    with open('/proc/diskstats', 'r') as diskstats:
-        for line in diskstats:
-            parts = ' '.join(line.strip().split()).split()
-            device = parts[2]
-            if device.startswith('sd') or device.startswith('mmcblk'):
-                raw = list(map(float, parts[3:]))
-                if device in last_raw['diskstats']:
-                    last = last_raw['diskstats'][device]
-                    delta = [r - l for (r, l) in zip(raw, last)]
-                    delta[2] *= 512.0
-                    delta[7] *= 512.0
-                    rates = [round(d / interval, 2) for d in delta]
-                    data = dict(zip(diskstats_columns, rates))
-                    stats[device] = data
-                last_raw['diskstats'][device] = raw
-    return {'diskstats': stats} if len(stats) != 0 else None
+def cpu_statistics():
+
+    global last_stats
+
+    stats = psutil.cpu_stats()
+
+    raw = {'context_switches': stats.ctx_switches,
+           'interrupts':       stats.interrupts,
+           'soft_interrupts':  stats.soft_interrupts}
+
+    delta = {}
+    for statistic in last_stats:
+        delta[statistic] = raw[statistic] - last_stats[statistic]
+
+    last_stats = raw
+    return {'cpu_statistics': delta} if len(delta) != 0 else None
 
 
-netdev_columns = ['receive_bytes',      'receive_packets',
-                  'receive_errors',     'receive_dropped',
-                  'receive_fifo',       'receive_frame',
-                  'receive_compressed', 'receive_multicast',
-                  'transmit_bytes',     'transmist_packets',
-                  'transmit_errors',    'transmit_dropped',
-                  'transmit_fifo',      'transmit_collisions',
-                  'transmist_carrier',  'transmist_compressed']
+#
+# Collect disk and pseudo-disk statistics.
+#
+
+def disk_statistics():
+
+    global last_diskstats
+
+    system = psutil.disk_io_counters()
+    values = [x for x in dir(system)
+                  if not x.startswith('_') and
+                     not callable(getattr(system, x))]
+
+    counters = psutil.disk_io_counters(perdisk=True)
+    counters['all'] = system
+
+    raw = {}
+    for disk in counters:
+        if not disk.startswith('loop'):
+            raw[disk] = {}
+            for value in values:
+                raw[disk][value] = getattr(counters[disk], value)
+
+    delta = {}
+    for disk in last_diskstats:
+        delta[disk] = {x: raw[disk][x] - last_diskstats[disk].get(x, 0) for x in raw[disk].keys()}
+    last_diskstats = raw
+
+    return {'diskstats': delta} if len(delta) != 0 else None
+
+
+#
+# Collect Linux RAID statistics.
+#
+
+def raid():
+    return {'raid': mdstat.parse()}
+
+
+#
+# Collect network device statistics.
+#
 
 def netdev():
-    stats = {}
-    with open('/proc/net/dev', 'r') as netdev:
-        for line in netdev:
-            parts = ' '.join(line.strip().split()).split()
-            if parts[0].endswith(':'):
-                device = parts[0][0:-1]
-                if device == 'lo':
-                    device = 'loopback'
-                raw = list(map(float, parts[1:]))
-                if device in last_raw['netdev']:
-                    last = last_raw['netdev'][device]
-                    delta = [r - l for (r, l) in zip(raw, last)]
-                    rates = [round(d / interval, 2) for d in delta]
-                    data = dict(zip(netdev_columns, rates))
-                    stats[device] = data
-                last_raw['netdev'][device] = raw
-    return {'netdev': stats} if len(stats) != 0 else None
+
+    global last_netdev
+
+    counters = psutil.net_io_counters(pernic=True)
+    loop = counters['lo']
+    values = [x for x in dir(counters['lo'])
+                  if not x.startswith('_') and
+                     not callable(getattr(counters['lo'], x))]
+
+    raw = {}
+    for device in counters:
+        raw[device] = {}
+        for value in values:
+            raw[device][value] = getattr(counters[device], value)
+
+    delta = {}
+    for device in last_netdev:
+        delta[device] = {x: raw[device][x] - last_netdev[device].get(x, 0) for x in raw[device].keys()}
+
+    last_netdev = raw
+    return {'netdev': delta} if len(delta) != 0 else None
 
 
-def read_status(now, interval):
+#
+# Collect board status.
+#
+
+def status(now, interval):
+
     status = {'datetime': round(now, 3),
               'interval': interval,
               'system': system}
-    with open('/proc/stat', 'r') as stat:
-        for line in stat:
-            parts = ' '.join(line.strip().split()).split()
-            if parts[0] == 'btime':
-                status['uptime'] = int(now - float(parts[1]))
-                break
-    if temperature_path:
-        with open(temperature_path, 'r') as source:
-            temperature = float(source.readline().strip()) / 1000.0
-            status['temperature'] = round(temperature, 1)
+
+    boot_time = psutil.boot_time()
+    status['uptime'] = int(now - psutil.boot_time())
+
+    temperatures = {}
+    sensors = psutil.sensors_temperatures()
+    for sensor in sensors:
+        if sensor in temperature_sensors:
+            name = temperature_sensors[sensor][0]
+        else:
+            name = sensor
+        current = sensors[sensor][0].current
+        high = sensors[sensor][0].high if sensors[sensor][0].high else 0.0
+        critical = sensors[sensor][0].critical if sensors[sensor][0].critical else 0.0
+        temperatures[name] = {'current': current, 'high':  high, 'critical': critical}
+    if len(temperatures) > 0:
+        status['temperatures'] = temperatures
+
+    # Following is helios4 specific; maybe something using 'lm_sensors'.
+    fans = {}
+    for fan in fan_sensors:
+        with open(fan[1]) as sensor:
+            fans[fan[0]] = round((float(sensor.read()) / 255.0) * 100.0, 1)
+    if len(fans) > 0:
+        status['fans'] = fans
+
     return {'status': status}
 
 
-df_thread = None
-df_lock = threading.Lock()
-df_event = threading.Event()
-df_filesystems = None
+#
+# Collect file system statistics.
+#
 
-def df_task():
-
-    global df_filesystems
-
-    while not df_event.wait(delay(interval)):
-        filesystems = {}
-        df = subprocess.Popen('/bin/df -l',
-                              shell=True,
-                              universal_newlines=True,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
-        line = df.stdout.readline()
-        for line in df.stdout:
-            parts = ' '.join(line.strip().split(' ')).split()
-            device = parts[0]
-            size = int(parts[1]) * 1024
-            used = int(parts[2]) * 1024
-            available = int(parts[3]) * 1024
-            used_percent = (float(used) / float(size)) * 100.0
-            if not 'tmpfs' in device:
-                disk = device.split('/')[2]
-                if disk == 'root':   # XXX - Need a better solution
-                    disk = 'mmcblk0p2'
-                filesystems[parts[5]] = {'device': disk,
-                                         'size': size,
-                                         'used': used,
-                                         'used%': round(used_percent, 0),
-                                         'available': available}
-        with df_lock:
-            df_filesystems = {'filesystems': filesystems}
-
-def df():
-
-    global df_thread
-    global df_filesystems
-
-    if not df_thread:
-        df_thread = threading.Thread(target=df_task)
-        df_thread.start()
-
-    with df_lock:
-        filesystems = df_filesystems
-        df_filesystems = None
-
-    return filesystems
+def filesystems():
+    filesystems = {}
+    partitions = psutil.disk_partitions()
+    for partition in partitions:
+        usage = psutil.disk_usage(partition.mountpoint)
+        filesystems[partition.mountpoint] = {'device': partition.device,
+                                             'size': usage.total,
+                                             'used': usage.used,
+                                             'used%': usage.percent,
+                                             'available': usage.free}
+    return {'filesystems': filesystems}
 
 
-def processes():
-    return None
-
-
-def ntpd():
-    return None
-
+#
+# Take the collected statistics dictionaries and merge them into a single one.
+#
 
 def merge_dictionaries(*dictionaries):
     '''
@@ -275,17 +331,23 @@ def merge_dictionaries(*dictionaries):
     return result
 
 
+#
+# Main collection function.
+#
+
 def collect():
 
     now = time.time()
 
     results = []
-    results.append(read_status(now, interval))
+    results.append(status(now, interval))
     results.append(loadavg())
     results.append(meminfo())
-    results.append(stat())
-    results.append(df())
-    results.append(diskstats())
+    results.append(cpu_utilizations())
+    results.append(cpu_statistics())
+    results.append(filesystems())
+    results.append(disk_statistics())
+    results.append(raid())
     results.append(netdev())
 
     elapsed = time.time() - now
@@ -294,25 +356,9 @@ def collect():
     return results
 
 
-temperature_sensors = [
-    '/sys/devices/virtual/thermal/thermal_zone0/temp'
-]
-for temperature_path in temperature_sensors:
-    if os.path.isfile(temperature_path):
-        break
-else:
-    temperature_path = none
-
-
-def signal_handler(signum, frame):
-    df_event.set()
-    terminate.set()
-    mqtt_client.disconnect()
-
-
-interval = 15
-terminate = threading.Event()
-
+#
+# Main reoutine.
+#
 
 if __name__ == '__main__':
 
