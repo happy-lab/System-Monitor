@@ -1,8 +1,9 @@
 # Publish System Performance Data to MQTT
 This service monitors the system performance data from files in Linux's
-`/proc` file system data and publishes them to a MQTT server.
+`/proc` file system data, mostly by the Python **psutil** module and
+publishes them to a MQTT server.
 
-THis program is an experiment.  It is similar to the data collection
+This program is an experiment.  It is similar to the data collection
 capabilities of [collectd](http://www.collectd.org) and
 [Monitorix](http://www.monitorix.org).  These programs are sinks and
 have limitied capabilities to act on the data as it is collected.
@@ -19,10 +20,12 @@ systems running on ARM processors and a Fedora 23 system.
 ## Installation
 * Install and configure a MQTT server or use a public service.
 * Install the Python MQTT Client
+	* `pip install psutil`
 	* `pip install paho-mqtt`
+	* `pip install mdstat`
 * Copy the program to the desired directories or run `makepkg` and
 install with **pacman**.
-* Modify the **sensor_acurite** configuation file and place in
+* Modify the **system_monitor** configuation file and place in
 `/etc/sensor/system_monitor.conf`
 * Enable the services:
 	* `systemctl enable system_monitor`
