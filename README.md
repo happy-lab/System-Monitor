@@ -1,7 +1,8 @@
 # Publish System Performance Data to MQTT
 This service monitors the system performance data from files in Linux's
 `/proc` file system data, mostly by the Python **psutil** module and
-publishes them to a MQTT server.
+publishes them to a MQTT server.  From there the statistics are recorded
+into an **InfluxDB** database.
 
 This program is an experiment.  It is similar to the data collection
 capabilities of [collectd](http://www.collectd.org) and
@@ -12,10 +13,13 @@ have limitied capabilities to act on the data as it is collected.
 This program is released under a MIT [license](./LICENSE).
 
 ## Implementation
-All program are written in Python 3 and require that the
-[Python MQTT package](https://pypi.python.org/pypi/paho-mqtt/1.1) be installed.
 The program was developed and tested on **Arch Linux**
-systems running on ARM processors and a Fedora 23 system.
+systems running on ARM processors and a CentOS 7 system
+running an Intel i7 processor.  It has also been tested
+and a Marvel ARMADA 388 processor running Armbian 5.9.1.
+
+The program is written in Python 3 and require that the
+following modules be installed:
 
 ## Installation
 * Install and configure a MQTT server or use a public service.
