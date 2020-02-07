@@ -1,5 +1,5 @@
 [Unit]
-Description=Linux System Monitor Publisher
+Description=Linux System Performance and Status Monitor Publisher
 Documentation=man:system_monitor(1)
 
 [Service]

@@ -357,7 +357,7 @@ def collect():
 
 
 #
-# Main reoutine.
+# Main routine.
 #
 
 if __name__ == '__main__':
@@ -366,7 +366,7 @@ if __name__ == '__main__':
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Use verbose logging.')
     parser.add_argument('-c', '--file', action='store',
-                        default='/etc/sensors.d/system_monitor.conf',
+                        default='/etc/sensors/system_monitor.conf',
                         help='Configuration file.')
     arguments = parser.parse_args()
 

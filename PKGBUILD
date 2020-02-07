@@ -1,15 +1,15 @@
 #
-# This is the PKGBUILD for Liunux System Monitor  MQTT Package
+# This is the PKGBUILD for Linux System Performance and Status Monitor Package
 #
 
-pkgname=sensors_acurite
+pkgname=system_monitor
 pkgver=1.1.0
 pkgrel=1
-pkgdesc="AcuRite Weather Station Sensors Publish Through MQTT"
+pkgdesc="Publish System Performance and Status Data to MQTT"
 arch=('i686' 'x86_64' 'arm' 'armv6h' 'armv7h')
 url="http://happy-lab.llc/"
-depends=('python')
-provides=('sensors_acurite')
+depends=('python3')
+provides=('system_monitor')
 license=('MIT')
 source=("$pkgname" "$pkgname.service" "$pkgname.conf.example" "LICENSE")
 install=$pkgname.install
