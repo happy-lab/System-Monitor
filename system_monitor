@@ -289,8 +289,9 @@ def status(now, interval):
     # Following is helios4 specific; maybe something using 'lm_sensors'.
     fans = {}
     for fan in fan_sensors:
-        with open(fan[1]) as sensor:
-            fans[fan[0]] = round((float(sensor.read()) / 255.0) * 100.0, 1)
+        if os.path.exists(fan[1]):
+            with open(fan[1]) as sensor:
+                fans[fan[0]] = round((float(sensor.read()) / 255.0) * 100.0, 1)
     if len(fans) > 0:
         status['fans'] = fans
 
