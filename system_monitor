@@ -7,7 +7,7 @@ import re
 import signal
 import threading
 import logging
-import datetime
+from datetime import datetime
 import platform
 import argparse
 import traceback
@@ -265,8 +265,7 @@ def netdev():
 
 def status(now, interval):
 
-    status = {'datetime': round(now, 3),
-              'interval': interval,
+    status = {'interval': interval,
               'system': system}
 
     boot_time = psutil.boot_time()
@@ -341,6 +340,7 @@ def collect():
     now = time.time()
 
     results = []
+    results.append({'timestamp': datetime.fromtimestamp(now).strftime('%Y-%m-%dT%H:%M:%S%fZ')})
     results.append(status(now, interval))
     results.append(loadavg())
     results.append(meminfo())
