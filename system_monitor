@@ -34,6 +34,7 @@ last_diskstats = {}
 last_netdev = {}
 last_stats = {}
 last_utilizations = {}
+last_swap = {}
 
 
 #
@@ -126,20 +127,34 @@ def meminfo():
     memory = { 'virtual': {}, 'swap': {} }
 
     virtual = psutil.virtual_memory()
-    values = [x for x in dir(virtual)
+    fields = [x for x in dir(virtual)
                   if not x.startswith('_') and
                      not callable(getattr(virtual, x)) and
                      x != 'percent']
-    for value in values:
-        memory['virtual'][value] = getattr(virtual, value)
+    for field in fields:
+        memory['virtual'][field] = getattr(virtual, field)
+
+    def swap_delta(name, value):
+        current = value
+        if name in last_swap:
+            value = value - last_swap[name]
+        else:
+            value = 0
+        last_swap[name] = current
+        return value
 
     swap = psutil.swap_memory()
-    values = [x for x in dir(swap)
+    fields = [x for x in dir(swap)
                   if not x.startswith('_') and
                      not callable(getattr(swap, x)) and
                      x != 'percent']
-    for value in values:
-        memory['swap'][value] = getattr(swap, value)
+    for field in fields:
+        value = getattr(swap, field)
+        if field == 'sin':
+            value = swap_delta('sin', value)
+        elif field == 'sout':
+            value = swap_delta('sout', value)
+        memory['swap'][field] = value
 
     return { 'memory': memory }
 
@@ -290,7 +305,7 @@ def status(now, interval):
     for fan in fan_sensors:
         if os.path.exists(fan[1]):
             with open(fan[1]) as sensor:
-                fans[fan[0]] = round((float(sensor.read()) / 255.0) * 100.0, 1)
+                fans[fan[0] + '%'] = round((float(sensor.read()) / 255.0) * 100.0, 1)
     if len(fans) > 0:
         status['fans'] = fans
 
@@ -337,7 +352,7 @@ def merge_dictionaries(*dictionaries):
 
 def collect():
 
-    now = time.time()
+    now = round(time.time())
 
     results = []
     results.append({'timestamp': datetime.fromtimestamp(now).strftime('%Y-%m-%dT%H:%M:%S.%fZ')})
