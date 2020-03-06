@@ -160,7 +160,7 @@ def meminfo():
 
 
 #
-# Collect CPU tuilizations.
+# Collect CPU utilizations.
 #
 
 def cpu_utilizations():
@@ -305,7 +305,8 @@ def status(now, interval):
     for fan in fan_sensors:
         if os.path.exists(fan[1]):
             with open(fan[1]) as sensor:
-                fans[fan[0] + '%'] = round((float(sensor.read()) / 255.0) * 100.0, 1)
+                value = float(sensor.read())
+                fans[fan[0]] = {'current': value, 'duty%': round((value / 255.0) * 100.0, 1)}
     if len(fans) > 0:
         status['fans'] = fans
 

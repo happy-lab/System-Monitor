@@ -13,7 +13,7 @@ provides=('system_monitor')
 license=('MIT')
 source=("$pkgname" "$pkgname.service" "$pkgname.conf.example" "LICENSE")
 install=$pkgname.install
-sha256sums=('497e18e30986af1b89e0ee2020baa6c550db3f9d3b2d7db09ec92e9f64eef5b6'
+sha256sums=('99af3264883abb81c5476d5f92ef22c76e2ccf25febd5e1934dc11ac36d3e90d'
             '11cc7fb71f5e5ffaa72c284bb9c3bdf5e8db72e467264b9a63f27dd8f0cfb20c'
             '50ed716fb901fed1a1a36425da0c92c42cec6262762f9ccf935ff5a4f75072e6'
 	    '847c12d8681bb838663288a5260242f96c6b36666f234ddc163b8fc294619e4c')
