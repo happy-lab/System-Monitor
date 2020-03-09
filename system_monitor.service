@@ -4,7 +4,7 @@ Documentation=man:system_monitor(1)
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/system_monitor -c /etc/sensors/system_monitor.conf
+ExecStart=/usr/bin/system_monitord -c /etc/sensors/system_monitor.conf
 Restart=on-failure
 
 [Install]

@@ -6,15 +6,15 @@ pkgname = system_monitor
 pkgdir = 
 
 install :
-	sed -e 's%/usr/bin/%/usr/local/bin/%' < "${pkgname}.service" > "${pkgname}.armbian"
-	install -Dm755 "${pkgname}" "${pkgdir}/usr/local/bin/${pkgname}"
-	install -Dm644 "${pkgname}.armbian" "${pkgdir}/etc/systemd/system/${pkgname}.service"
-	install -Dm644 "${pkgname}.conf.example" "${pkgdir}/etc/sensors/${pkgname}.conf.example"
-	install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+	sed -e 's%/usr/bin/%/usr/local/bin/%' < "system_monitor.service" > "system_monitor.armbian"
+	install -Dm755 "system_monitord" "${pkgdir}/usr/local/bin/system_monitord"
+	install -Dm644 "system_monitor.armbian" "${pkgdir}/etc/systemd/system/system_monitor.service"
+	install -Dm644 "system_monitor.conf.example" "${pkgdir}/etc/sensors/system_monitor.conf.example"
+	install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/system_monitor/LICENSE"
 	${RM} "${pkgname}.armbian"
 
 clean :
-	${RM} "${pkgdir}/usr/local/bin/system_monitor"
-	${RM} "${pkgdir}/etc/system/${pkgname}.service"
-	${RM} "${pkgdir}/etc/sensors/${pkgname}.conf.example"
-	${RM} "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+	${RM} "${pkgdir}/usr/local/bin/system_monitord"
+	${RM} "${pkgdir}/etc/system/system_monitor.service"
+	${RM} "${pkgdir}/etc/sensors/system_monitor.conf.example"
+	${RM} "${pkgdir}/usr/share/licenses/system_monitor/LICENSE"

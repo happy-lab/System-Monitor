@@ -11,28 +11,28 @@ url="http://happy-lab.llc/"
 depends=('python3')
 provides=('system_monitor')
 license=('MIT')
-source=("$pkgname" "$pkgname.service" "$pkgname.conf.example" "LICENSE")
+source=('system_monitord' 'system_monitor.service' 'system_monitor.conf.example' 'LICENSE')
 install=$pkgname.install
-sha256sums=('99af3264883abb81c5476d5f92ef22c76e2ccf25febd5e1934dc11ac36d3e90d'
-            '11cc7fb71f5e5ffaa72c284bb9c3bdf5e8db72e467264b9a63f27dd8f0cfb20c'
+sha256sums=('b2dfc979a4e2db534006820099970032b601851b056346b91845e7c5d45a1892'
+            'd3a82f3dd628f041ffb36f8bdb86de981ed570861a9885fd85167e84480d93c4'
             '50ed716fb901fed1a1a36425da0c92c42cec6262762f9ccf935ff5a4f75072e6'
 	    '847c12d8681bb838663288a5260242f96c6b36666f234ddc163b8fc294619e4c')
 
 package() {
 
   # Daemon
-  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm755 "system_monitord" "${pkgdir}/usr/bin/system_monitord"
 
   # Daemon systemd service file
-  install -Dm644 "$pkgname.service" "$pkgdir/usr/lib/systemd/system/$pkgname.service"
+  install -Dm644 "system_monitor.service" "${pkgdir}/usr/lib/systemd/system/system_monitor.service"
 
   # Daemon configuration file
-  install -Dm644 "$pkgname.conf.example" "$pkgdir/etc/sensors/$pkgname.conf.example"
+  install -Dm644 "system_monitor.conf.example" "${pkgdir}/etc/sensors/system_monitor.conf.example"
 
   # Daemon PID file
-  #echo 'pid_file /run/$pkgname.pid' >> "$pkgdir/etc/sensors/$pkgname.conf.example"
+  #echo 'pid_file /run/system_monitor.pid' >> "${pkgdir}/etc/sensors/system_monitor.conf.example"
 
   # License
-  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/system_monitor/LICENSE"
 
 }
